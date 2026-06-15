@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "databricks": {
+      "command": "/Users/zachary.higgins/.ai-dev-kit/.venv/bin/python",
+      "args": ["/Users/zachary.higgins/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"],
+      "env": {"DATABRICKS_CONFIG_PROFILE": "careindia-access"}
+    }
+  }
+}
