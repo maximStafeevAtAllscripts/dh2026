@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 // ── Templated configuration (resolved by `databricks apps init`) ────────────
 const APP_CONFIG = {
-  name: 'careindia-access',
+  name: 'CareAccess India',
   plugins: [
     'lakebase',
   ],
@@ -23,9 +23,9 @@ const PLUGIN_PAGES: Record<string, PluginPage> = {
     expectedTexts: ['SQL Query Result', 'Sales Data Filter'],
   },
   lakebase: {
-    navLabel: 'Care Desert Indicators',
+    navLabel: 'CareAccess India',
     path: '/lakebase',
-    expectedTexts: ['databricks_postgres.default.caredesertindicators'],
+    expectedTexts: ['Medical desert planner', 'Care need', 'Highest-risk districts'],
   },
   genie: {
     navLabel: 'Genie',
@@ -50,12 +50,13 @@ test('smoke test - app loads and displays home page', async ({ page }) => {
   await page.goto('/');
 
   await expect(page.getByRole('heading', { name: APP_CONFIG.name })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Care Desert Indicators' })).toBeVisible();
-  await expect(page.getByText('databricks_postgres.default.caredesertindicators')).toBeVisible();
-
-  await expect(page.getByRole('link', { name: 'Care Desert Indicators' })).toBeVisible();
+  await expect(page.getByText('Medical desert planner')).toBeVisible();
+  await expect(page.getByText('Care need')).toBeVisible();
+  await expect(page.getByRole('button', { name: /Overall Access/ })).toBeVisible();
+  await expect(page.getByText('Loading Lakebase data')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: /Overall Access \d+ high-risk districts/ })).toBeVisible();
   for (const [, plugin] of enabledPages) {
-    await expect(page.getByRole('link', { name: plugin.navLabel })).toBeVisible();
+    await expect(page.getByText(plugin.navLabel)).toBeVisible();
   }
 });
 
@@ -64,8 +65,9 @@ for (const [name, plugin] of enabledPages) {
     await page.goto(plugin.path);
 
     await expect(page.getByRole('heading', { name: plugin.navLabel })).toBeVisible();
+    await expect(page.getByText('Loading Lakebase data')).not.toBeVisible();
     for (const text of plugin.expectedTexts) {
-      await expect(page.getByText(text, { exact: true })).toBeVisible();
+      await expect(page.getByText(text)).toBeVisible();
     }
   });
 }
