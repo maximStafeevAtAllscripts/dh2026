@@ -25,7 +25,7 @@ const PLUGIN_PAGES: Record<string, PluginPage> = {
   lakebase: {
     navLabel: 'CareAccess India',
     path: '/lakebase',
-    expectedTexts: ['Medical desert planner', 'Care need', 'Highest-risk districts'],
+    expectedTexts: ['Medical desert planner', 'Care need', 'Priority clusters'],
   },
   genie: {
     navLabel: 'Genie',

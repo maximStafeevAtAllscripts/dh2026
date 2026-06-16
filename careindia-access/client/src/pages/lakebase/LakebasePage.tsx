@@ -51,6 +51,8 @@ type IndicatorRow = {
   cancer_screening_score: number | string | null;
   cancer_screening_risk: string | null;
   overall_care_desert_risk: string | null;
+  intervention_priority: string | null;
+  estimated_population_impact: number | string | null;
 };
 
 type CategoryId = 'overall' | 'maternal' | 'diabetes' | 'hypertension' | 'nutrition' | 'cancer';
@@ -77,6 +79,11 @@ type DistrictPoint = {
   confidence: number;
   dataPoor: boolean;
   scores: { label: string; value: number | null }[];
+  interventionPriority: string;
+  populationImpact: number;
+  memberCount: number;
+  districts: string[];
+  clusterColor: [number, number, number, number];
 };
 
 const CATEGORIES: Category[] = [
@@ -214,18 +221,28 @@ const riskToSeverity = (risk: string) => {
   return 0.4;
 };
 
-const severityColor = (severity: number, dataPoor = false) => {
-  if (dataPoor) return '#6b7280';
-  if (severity >= 0.75) return '#dc2626';
-  if (severity >= 0.45) return '#f59e0b';
-  return '#16a34a';
+const priorityRank = (priority: string) => {
+  const value = priority.toLowerCase();
+  if (value.includes('critical')) return 3;
+  if (value.includes('high')) return 2;
+  if (value.includes('low')) return 1;
+  return 0;
 };
 
-const severityLabel = (severity: number, dataPoor = false) => {
-  if (dataPoor) return 'Data-poor';
-  if (severity >= 0.75) return 'Severe gap';
-  if (severity >= 0.45) return 'Moderate gap';
-  return 'Adequate';
+const priorityFillColor = (priority: string): [number, number, number, number] => {
+  const rank = priorityRank(priority);
+  if (rank >= 3) return [220, 38, 38, 220];
+  if (rank === 2) return [245, 158, 11, 220];
+  if (rank === 1) return [22, 163, 74, 220];
+  return [107, 114, 128, 190];
+};
+
+const colorCss = ([red, green, blue, alpha]: [number, number, number, number]) => {
+  return `rgba(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)}, ${(alpha / 255).toFixed(2)})`;
+};
+
+const strongestPriority = (priorities: string[]) => {
+  return priorities.reduce((best, current) => (priorityRank(current) > priorityRank(best) ? current : best), 'Unknown Priority');
 };
 
 const formatNumber = (value: number) => value.toLocaleString('en-IN');
@@ -236,6 +253,74 @@ const coordinateFor = (row: IndicatorRow, index: number): [number, number] => {
   const angle = index * 2.3999632297;
   const radius = 0.12 + (index % 8) * 0.035;
   return [base[0] + Math.sin(angle) * radius, base[1] + Math.cos(angle) * radius];
+};
+
+const clusterGridSizeForZoom = (zoom: number) => {
+  if (zoom < 4) return 1.15;
+  if (zoom < 5) return 0.75;
+  if (zoom < 6) return 0.45;
+  if (zoom < 7) return 0.25;
+  if (zoom < 8) return 0.14;
+  return 0.06;
+};
+
+const clusterPoints = (points: DistrictPoint[], zoom: number) => {
+  const gridSize = clusterGridSizeForZoom(zoom);
+  const clusters = new Map<string, DistrictPoint[]>();
+
+  for (const point of points) {
+    const longitudeBucket = Math.round(point.longitude / gridSize);
+    const latitudeBucket = Math.round(point.latitude / gridSize);
+    const key = `${longitudeBucket}:${latitudeBucket}`;
+    const existing = clusters.get(key) ?? [];
+    existing.push(point);
+    clusters.set(key, existing);
+  }
+
+  return Array.from(clusters.entries()).map(([key, members]) => {
+    const totalImpact = members.reduce((sum, member) => sum + member.populationImpact, 0);
+    const totalHouseholds = members.reduce((sum, member) => sum + member.households, 0);
+    const totalWomen = members.reduce((sum, member) => sum + member.women, 0);
+    const totalWeight = Math.max(totalImpact, members.length);
+    const longitude = members.reduce((sum, member) => sum + member.longitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
+    const latitude = members.reduce((sum, member) => sum + member.latitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
+    const interventionPriority = strongestPriority(members.map((member) => member.interventionPriority));
+    const weightedColor = members.reduce<[number, number, number, number]>((color, member) => {
+      const weight = Math.max(member.populationImpact, 1);
+      const memberColor = priorityFillColor(member.interventionPriority);
+      return [
+        color[0] + memberColor[0] * weight,
+        color[1] + memberColor[1] * weight,
+        color[2] + memberColor[2] * weight,
+        color[3] + memberColor[3] * weight,
+      ];
+    }, [0, 0, 0, 0]).map((channel) => channel / totalWeight) as [number, number, number, number];
+    const severity = members.reduce((max, member) => Math.max(max, member.severity), 0);
+    const confidence = members.reduce((sum, member) => sum + member.confidence, 0) / members.length;
+    const districts = members.flatMap((member) => member.districts);
+    const primary = [...members].sort((a, b) => b.populationImpact - a.populationImpact)[0];
+
+    return {
+      ...primary,
+      id: `cluster:${key}`,
+      district: members.length === 1 ? primary.district : `${members.length} districts`,
+      state: members.length === 1 ? primary.state : `${new Set(members.map((member) => member.state)).size} states`,
+      latitude,
+      longitude,
+      households: totalHouseholds,
+      women: totalWomen,
+      riskLabel: members.length === 1 ? primary.riskLabel : 'Aggregated care desert signal',
+      severity,
+      confidence,
+      dataPoor: members.every((member) => member.dataPoor),
+      scores: primary.scores,
+      interventionPriority,
+      populationImpact: totalImpact,
+      memberCount: members.length,
+      districts,
+      clusterColor: weightedColor,
+    } satisfies DistrictPoint;
+  });
 };
 
 function useCareDesertData() {
@@ -269,16 +354,21 @@ function useCareDesertData() {
   return { rows, loading, error };
 }
 
-function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | null, onSelect: (id: string) => void) {
+function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | null, onSelect: (id: string) => void, onZoomChange: (zoom: number) => void) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const popupRef = useRef<mapboxgl.Popup | null>(null);
   const onSelectRef = useRef(onSelect);
+  const onZoomChangeRef = useRef(onZoomChange);
 
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
+
+  useEffect(() => {
+    onZoomChangeRef.current = onZoomChange;
+  }, [onZoomChange]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -296,6 +386,11 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
     map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'bottom-right');
     map.fitBounds(INDIA_BOUNDS, { padding: 36, duration: 0 });
 
+    const publishZoom = () => onZoomChangeRef.current(Number(map.getZoom().toFixed(2)));
+    map.on('load', publishZoom);
+    map.on('zoomend', publishZoom);
+    map.on('moveend', publishZoom);
+
     const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
     map.addControl(overlay);
 
@@ -304,6 +399,9 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
 
     return () => {
       popupRef.current?.remove();
+      map.off('load', publishZoom);
+      map.off('zoomend', publishZoom);
+      map.off('moveend', publishZoom);
       overlay.finalize();
       map.remove();
       mapRef.current = null;
@@ -320,16 +418,16 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
           id: 'care-desert-heatmap',
           data: points,
           getPosition: (point) => [point.longitude, point.latitude],
-          getWeight: (point) => Math.max(0.08, point.severity) * Math.max(1, point.households / 1000),
+          getWeight: (point) => Math.max(1, point.populationImpact),
           radiusPixels: 58,
           intensity: 1.6,
           threshold: 0.04,
           colorRange: [
-            [45, 212, 191, 40],
-            [22, 163, 74, 95],
-            [245, 158, 11, 130],
-            [251, 113, 133, 165],
-            [220, 38, 38, 210],
+            [22, 163, 74, 35],
+            [22, 163, 74, 85],
+            [245, 158, 11, 125],
+            [245, 158, 11, 165],
+            [220, 38, 38, 215],
           ],
           pickable: false,
         }),
@@ -337,17 +435,12 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
           id: 'care-desert-points',
           data: points,
           getPosition: (point) => [point.longitude, point.latitude],
-          getRadius: (point) => Math.max(9000, Math.min(32000, 9000 + Math.sqrt(Math.max(point.households, 1)) * 620)),
+          getRadius: (point) => Math.max(12000, Math.min(76000, 10000 + Math.sqrt(Math.max(point.populationImpact, 1)) * 1150)),
           radiusUnits: 'meters',
           stroked: true,
           filled: true,
           lineWidthMinPixels: 1.4,
-          getFillColor: (point) => {
-            if (point.dataPoor) return [255, 255, 255, 210];
-            if (point.severity >= 0.75) return [220, 38, 38, 210];
-            if (point.severity >= 0.45) return [245, 158, 11, 210];
-            return [22, 163, 74, 210];
-          },
+          getFillColor: (point) => point.clusterColor,
           getLineColor: (point) => (point.dataPoor ? [154, 163, 175, 230] : [255, 255, 255, 235]),
           pickable: true,
           onClick: ({ object }: DeckPickingInfo) => {
@@ -368,7 +461,7 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
             popupRef.current = new mapboxgl.Popup({ closeButton: false, closeOnClick: false, offset: 12 })
               .setLngLat(map.unproject([x, y]))
               .setHTML(
-                `<div class="cai-map-popup"><strong>${object.district}</strong><span>${object.state}</span><b style="color:${severityColor(object.severity, object.dataPoor)}">${severityLabel(object.severity, object.dataPoor)} - ${Math.round(object.severity * 100)}</b></div>`,
+                `<div class="cai-map-popup"><strong>${object.district}</strong><span>${object.state} - ${object.memberCount} district${object.memberCount === 1 ? '' : 's'}</span><b style="color:${colorCss(object.clusterColor)}">${object.interventionPriority}${object.memberCount > 1 ? ' blend' : ''}</b><span>impact: ${formatNumber(object.populationImpact)}</span></div>`,
               )
               .addTo(map);
             return true;
@@ -391,6 +484,7 @@ export function LakebasePage() {
   const [categoryId, setCategoryId] = useState<CategoryId>('overall');
   const [stateFilter, setStateFilter] = useState('all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mapZoom, setMapZoom] = useState(3.4);
   const [shortlist, setShortlist] = useState<string[]>(() => {
     try {
       return JSON.parse(localStorage.getItem(SHORTLIST_KEY) ?? '[]') as string[];
@@ -423,21 +517,34 @@ export function LakebasePage() {
         label: SCORE_LABELS[field] ?? String(field),
         value: row[field] === null ? null : toNumber(row[field]),
       })),
+      interventionPriority: normalize(row.intervention_priority) || 'Unknown Priority',
+      populationImpact: toNumber(row.estimated_population_impact),
+      memberCount: 1,
+      districts: [normalize(row.district_name) || 'Unknown district'],
+      clusterColor: priorityFillColor(normalize(row.intervention_priority) || 'Unknown Priority'),
     } satisfies DistrictPoint;
   }), [category, rows]);
 
   const states = useMemo(() => Array.from(new Set(points.map((point) => point.state))).sort(), [points]);
-  const scoped = useMemo(() => points.filter((point) => stateFilter === 'all' || point.state === stateFilter), [points, stateFilter]);
-  const ranked = useMemo(() => [...scoped].filter((point) => !point.dataPoor).sort((a, b) => b.severity - a.severity).slice(0, 12), [scoped]);
-  const selected = useMemo(() => points.find((point) => point.id === selectedId) ?? null, [points, selectedId]);
-  const mapRef = useMapboxHeatmap(scoped, selected, setSelectedId);
+  const allClusters = useMemo(() => clusterPoints(points, mapZoom), [mapZoom, points]);
+  const scopedDistricts = useMemo(() => points.filter((point) => stateFilter === 'all' || point.state === stateFilter), [points, stateFilter]);
+  const scoped = useMemo(() => clusterPoints(scopedDistricts, mapZoom), [mapZoom, scopedDistricts]);
+  const ranked = useMemo(
+    () => [...scoped]
+      .filter((point) => !point.dataPoor)
+      .sort((a, b) => priorityRank(b.interventionPriority) - priorityRank(a.interventionPriority) || b.populationImpact - a.populationImpact)
+      .slice(0, 12),
+    [scoped],
+  );
+  const selected = useMemo(() => scoped.find((point) => point.id === selectedId) ?? allClusters.find((point) => point.id === selectedId) ?? null, [allClusters, scoped, selectedId]);
+  const mapRef = useMapboxHeatmap(scoped, selected, setSelectedId, setMapZoom);
 
   const counts = useMemo(() => scoped.reduce(
     (acc, point) => {
-      if (point.dataPoor) acc.dataPoor += 1;
-      else if (point.severity >= 0.75) acc.high += 1;
-      else if (point.severity >= 0.45) acc.moderate += 1;
-      else acc.adequate += 1;
+      if (priorityRank(point.interventionPriority) >= 3) acc.high += 1;
+      else if (priorityRank(point.interventionPriority) === 2) acc.moderate += 1;
+      else if (priorityRank(point.interventionPriority) === 1) acc.adequate += 1;
+      else acc.dataPoor += 1;
       return acc;
     },
     { high: 0, moderate: 0, adequate: 0, dataPoor: 0 },
@@ -449,7 +556,7 @@ export function LakebasePage() {
   }, {} as Record<CategoryId, number>), [rows]);
 
   const shortlistPoints = shortlist
-    .map((id) => points.find((point) => point.id === id))
+    .map((id) => allClusters.find((point) => point.id === id))
     .filter((point): point is DistrictPoint => Boolean(point));
 
   const toggleShortlist = (point: DistrictPoint) => {
@@ -500,11 +607,11 @@ export function LakebasePage() {
           <div className="cai-divider" />
           <SectionLabel>Legend</SectionLabel>
           <div className="cai-legend">
-            <LegendDot color="#dc2626" label="High care gap" />
-            <LegendDot color="#f59e0b" label="Moderate gap" />
-            <LegendDot color="#16a34a" label="Adequate coverage" />
-            <LegendDot color="#9aa3af" label="Data-poor evidence" hollow />
-            <div className="cai-legend-note">Heat intensity combines risk severity and surveyed households.</div>
+            <LegendDot color="#dc2626" label="Critical Priority" />
+            <LegendDot color="#f59e0b" label="High Priority" />
+            <LegendDot color="#16a34a" label="Low Priority" />
+            <LegendDot color="#9aa3af" label="Unknown priority" hollow />
+            <div className="cai-legend-note">Circle area is proportional to estimated population impact. Nearby districts combine or split as zoom changes.</div>
           </div>
 
           <div className="cai-divider" />
@@ -513,7 +620,7 @@ export function LakebasePage() {
             <div className="cai-shortlist">
               {shortlistPoints.map((point) => (
                 <button key={point.id} className="cai-shortlist-chip" onClick={() => setSelectedId(point.id)}>
-                  <span style={{ background: severityColor(point.severity, point.dataPoor) }} />
+                  <span style={{ background: colorCss(point.clusterColor) }} />
                   <b>{point.district}</b>
                   <small>{point.state}</small>
                 </button>
@@ -533,9 +640,9 @@ export function LakebasePage() {
           {error && <MapOverlayState title="Lakebase query failed" detail={error} tone="error" />}
           {!loading && !error && scoped.length === 0 && <MapOverlayState title="No district rows" detail="Change the state or care-need filter." />}
           <div className="cai-stat-strip">
-            <StatCard value={counts.high} label="High-risk gaps" tone="red" />
-            <StatCard value={counts.dataPoor} label="Data-poor" tone="slate" />
-            <StatCard value={counts.adequate} label="Adequate" tone="green" />
+            <StatCard value={counts.high} label="Critical clusters" tone="red" />
+            <StatCard value={counts.moderate} label="High clusters" tone="yellow" />
+            <StatCard value={counts.adequate} label="Low clusters" tone="green" />
           </div>
         </main>
 
@@ -559,7 +666,7 @@ function LegendDot({ color, label, hollow = false }: { color: string; label: str
   return <div className="cai-legend-row"><span style={{ background: hollow ? '#fff' : color, borderColor: color, borderStyle: hollow ? 'dashed' : 'solid' }} />{label}</div>;
 }
 
-function StatCard({ value, label, tone }: { value: number; label: string; tone: 'red' | 'slate' | 'green' }) {
+function StatCard({ value, label, tone }: { value: number; label: string; tone: 'red' | 'yellow' | 'slate' | 'green' }) {
   return <div className="cai-stat-card"><b className={`tone-${tone}`}>{formatNumber(value)}</b><span>{label}</span></div>;
 }
 
@@ -572,16 +679,16 @@ function RankedList({ ranked, category, scope, dataPoorCount, onSelect, loading 
 
   return (
     <div className="cai-ranked-panel">
-      <SectionLabel>Highest-risk districts</SectionLabel>
+      <SectionLabel>Priority clusters</SectionLabel>
       <p>{category.short} - {scope}</p>
       {ranked.map((point, index) => (
         <button key={point.id} className="cai-rank-row" onClick={() => onSelect(point.id)}>
           <span className="cai-rank-num">{index + 1}</span>
-          <span className="cai-rank-main"><b>{point.district}</b><small>{point.state} - {formatNumber(point.households)} households</small><i><em style={{ width: `${Math.round(point.severity * 100)}%`, background: severityColor(point.severity) }} /></i></span>
-          <span className="cai-rank-score" style={{ color: severityColor(point.severity) }}><b>{Math.round(point.severity * 100)}</b><small>severity</small></span>
+          <span className="cai-rank-main"><b>{point.district}</b><small>{point.state} - {formatNumber(point.populationImpact)} impacted</small><i><em style={{ width: `${Math.min(100, 20 + priorityRank(point.interventionPriority) * 25)}%`, background: colorCss(point.clusterColor) }} /></i></span>
+          <span className="cai-rank-score" style={{ color: colorCss(point.clusterColor) }}><b>{formatNumber(point.populationImpact)}</b><small>impact</small></span>
         </button>
       ))}
-      <div className="cai-note"><b>{dataPoorCount} districts</b> are held out as data-poor because surveyed-household evidence is thin.</div>
+      <div className="cai-note"><b>{dataPoorCount} clusters</b> have unknown priority. Circle area is driven by estimated population impact.</div>
     </div>
   );
 }
@@ -594,11 +701,11 @@ function DistrictDetail({ point, saved, onBack, onToggleSave }: { point: Distric
         <button className={saved ? 'is-saved' : ''} onClick={onToggleSave}><Star size={13} fill={saved ? 'currentColor' : 'none'} /> {saved ? 'Saved' : 'Save'}</button>
       </div>
       <h2>{point.district}</h2>
-      <p>{point.state} - {formatNumber(point.households)} households surveyed</p>
+      <p>{point.state} - {formatNumber(point.populationImpact)} estimated population impact</p>
       {point.dataPoor && <div className="cai-warning"><AlertTriangle size={16} /><span><b>Data-poor region.</b> Interpret the apparent gap cautiously until local evidence improves.</span></div>}
       <div className="cai-detail-metrics">
-        <MetricBox label="Gap severity" value={Math.round(point.severity * 100)} suffix="/100" tone={severityColor(point.severity, point.dataPoor)} caption={severityLabel(point.severity, point.dataPoor)} />
-        <MetricBox label="Evidence confidence" value={Math.round(point.confidence * 100)} suffix="%" tone="#0d9488" caption={point.confidence >= 0.66 ? 'High' : point.confidence >= 0.4 ? 'Moderate' : 'Low'} />
+        <MetricBox label="Population impact" value={formatNumber(point.populationImpact)} suffix="" tone={colorCss(point.clusterColor)} caption={point.memberCount > 1 ? `${point.interventionPriority} blend` : point.interventionPriority} />
+        <MetricBox label="Districts combined" value={point.memberCount} suffix="" tone="#0d9488" caption={point.districts.slice(0, 2).join(', ')} />
       </div>
       <SectionLabel>Evidence breakdown</SectionLabel>
       <div className="cai-score-list">
@@ -606,13 +713,13 @@ function DistrictDetail({ point, saved, onBack, onToggleSave }: { point: Distric
       </div>
       <div className="cai-assessment">
         <SectionLabel>Assessment</SectionLabel>
-        <p>{point.district} is currently classified as <b>{point.riskLabel}</b>. The signal is based on Lakebase district indicators and weighted by surveyed-household evidence.</p>
-        <div><SectionLabel>Recommended action</SectionLabel><p>{point.severity >= 0.75 ? 'Prioritize field validation and targeted resource planning for this district.' : point.severity >= 0.45 ? 'Review service coverage and validate moderate care gaps before committing resources.' : 'Maintain monitoring cadence and focus resources on higher-risk districts.'}</p></div>
+        <p>{point.district} is currently classified as <b>{point.interventionPriority}</b>. The circle combines nearby districts, uses a population-impact-weighted priority color blend, and is sized by summed estimated population impact from Lakebase.</p>
+        <div><SectionLabel>Recommended action</SectionLabel><p>{priorityRank(point.interventionPriority) >= 3 ? 'Prioritize immediate field validation and intervention planning for this cluster.' : priorityRank(point.interventionPriority) === 2 ? 'Queue this cluster for near-term service readiness review.' : 'Monitor this cluster and focus urgent resources on higher-priority circles.'}</p></div>
       </div>
     </div>
   );
 }
 
-function MetricBox({ label, value, suffix, tone, caption }: { label: string; value: number; suffix: string; tone: string; caption: string }) {
+function MetricBox({ label, value, suffix, tone, caption }: { label: string; value: number | string; suffix: string; tone: string; caption: string }) {
   return <div className="cai-metric-box"><span>{label}</span><div><b style={{ color: tone }}>{value}</b><small>{suffix}</small></div><em style={{ color: tone }}>{caption}</em></div>;
 }

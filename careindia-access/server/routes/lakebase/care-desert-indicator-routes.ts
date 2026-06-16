@@ -10,7 +10,7 @@ interface AppKitWithLakebase {
 }
 
 const SOURCE_TABLE = '"default".care_desert_indicators_sync';
-const SOURCE_TABLE2 = '"default".care_desert_indicators_sync';
+const MASTER_VIEW = '"default".healthcare_master_view_v_sync';
 
 const INDICATOR_COLUMNS = `
   i1.district_name,
@@ -36,7 +36,9 @@ const INDICATOR_COLUMNS = `
   i1.cancer_screening_oral_pct,
   i1.cancer_screening_score,
   i1.cancer_screening_risk,
-  i1.overall_care_desert_risk
+  i1.overall_care_desert_risk,
+  i2.intervention_priority,
+  i2.estimated_population_impact
 `;
 
 export function setupCareDesertIndicatorRoutes(appkit: AppKitWithLakebase) {
@@ -44,9 +46,11 @@ export function setupCareDesertIndicatorRoutes(appkit: AppKitWithLakebase) {
     app.get('/api/care-desert-indicators', async (_req, res) => {
       try {
         const result = await appkit.lakebase.query(
-          `SELECT ${INDICATOR_COLUMNS}, i2.intervention_priority, i2.estimated_population_impact
-           FROM ${SOURCE_TABLE} i1 inner join ${SOURCE_TABLE2} i2
-             on i1.state_ut = i2.state_ut and i1.district_name = i2.district_name
+          `SELECT ${INDICATOR_COLUMNS}
+           FROM ${SOURCE_TABLE} i1
+           INNER JOIN ${MASTER_VIEW} i2
+             ON TRIM(i1.state_ut) = TRIM(i2.state_ut)
+            AND TRIM(i1.district_name) = TRIM(i2.district_name)
            WHERE i1.overall_care_desert_risk IS NOT NULL
            ORDER BY i1.state_ut, i1.district_name
            `,
