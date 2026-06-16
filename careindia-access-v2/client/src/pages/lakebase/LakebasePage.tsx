@@ -502,7 +502,7 @@ export function LakebasePage() {
           <option value="Monitor">Monitor</option>
         </select>
 
-        {loading ? <Skeleton className="h-80 w-full" /> : <RiskCategoryPanel rows={scopedRows} activeId={riskCategory} onSelect={setRiskCategory} />}
+        {loading ? <Skeleton className="h-80 w-full" /> : <RiskCategoryPanel activeId={riskCategory} onSelect={setRiskCategory} />}
 
         <div className="space-y-1.5 border-t border-slate-200 pt-2">
           <p className="text-xs font-bold uppercase tracking-[0.18em] text-slate-950">Legend</p>
@@ -680,13 +680,12 @@ function NarrativeBlock({ label, value, highlightNumbers = false }: { label: str
   );
 }
 
-function RiskCategoryPanel({ rows, activeId, onSelect }: { rows: IndicatorRow[]; activeId: RiskCategoryId; onSelect: (id: RiskCategoryId) => void }) {
+function RiskCategoryPanel({ activeId, onSelect }: { activeId: RiskCategoryId; onSelect: (id: RiskCategoryId) => void }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white px-1.5 py-1.5 shadow-sm">
       <p className="px-1 py-0.5 text-sm font-bold leading-none text-slate-950">Risk Categories</p>
       <div className="mt-1.5 space-y-1">
         {riskCategories.map((category) => {
-          const highRiskCount = rows.filter((row) => row[category.field] === 'High Risk').length;
           const active = activeId === category.id;
           return (
             <button
@@ -695,14 +694,9 @@ function RiskCategoryPanel({ rows, activeId, onSelect }: { rows: IndicatorRow[];
               onClick={() => onSelect(category.id)}
               className={`w-full rounded-md border px-2 py-1 text-left transition-colors ${active ? 'border-teal-600 bg-teal-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold leading-tight text-slate-950">{category.label}</p>
-                  <p className="text-[11px] font-medium leading-tight text-slate-600">{category.focus}</p>
-                </div>
-                <span className="rounded-full bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold leading-none text-red-700">
-                  {highRiskCount}
-                </span>
+              <div>
+                <p className="text-sm font-semibold leading-tight text-slate-950">{category.label}</p>
+                <p className="text-[11px] font-medium leading-tight text-slate-600">{category.focus}</p>
               </div>
             </button>
           );
