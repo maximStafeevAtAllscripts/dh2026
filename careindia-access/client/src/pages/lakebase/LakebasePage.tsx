@@ -84,6 +84,7 @@ type DistrictPoint = {
   memberCount: number;
   districts: string[];
   clusterColor: [number, number, number, number];
+  radiusPixels: number;
 };
 
 const CATEGORIES: Category[] = [
@@ -255,33 +256,57 @@ const coordinateFor = (row: IndicatorRow, index: number): [number, number] => {
   return [base[0] + Math.sin(angle) * radius, base[1] + Math.cos(angle) * radius];
 };
 
-const clusterGridSizeForZoom = (zoom: number) => {
-  if (zoom < 4) return 1.15;
-  if (zoom < 5) return 0.75;
-  if (zoom < 6) return 0.45;
-  if (zoom < 7) return 0.25;
-  if (zoom < 8) return 0.14;
-  return 0.06;
+const impactRadiusPixels = (impact: number) => {
+  return Math.max(7, Math.min(26, 6 + Math.sqrt(Math.max(impact, 1)) * 0.05));
 };
 
-const clusterPoints = (points: DistrictPoint[], zoom: number) => {
-  const gridSize = clusterGridSizeForZoom(zoom);
-  const clusters = new Map<string, DistrictPoint[]>();
+const projectToPixels = (longitude: number, latitude: number, zoom: number) => {
+  const worldSize = 512 * 2 ** zoom;
+  const sinLatitude = Math.sin((Math.max(-85.05113, Math.min(85.05113, latitude)) * Math.PI) / 180);
+  return {
+    x: ((longitude + 180) / 360) * worldSize,
+    y: (0.5 - Math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * Math.PI)) * worldSize,
+  };
+};
 
-  for (const point of points) {
-    const longitudeBucket = Math.round(point.longitude / gridSize);
-    const latitudeBucket = Math.round(point.latitude / gridSize);
-    const key = `${longitudeBucket}:${latitudeBucket}`;
-    const existing = clusters.get(key) ?? [];
-    existing.push(point);
-    clusters.set(key, existing);
-  }
+type ScreenCluster = {
+  members: DistrictPoint[];
+  longitude: number;
+  latitude: number;
+  x: number;
+  y: number;
+  populationImpact: number;
+  radiusPixels: number;
+};
 
-  return Array.from(clusters.entries()).map(([key, members]) => {
+const screenClusterFromMembers = (members: DistrictPoint[], zoom: number) => {
+  const populationImpact = members.reduce((sum, member) => sum + member.populationImpact, 0);
+  const totalWeight = members.reduce((sum, member) => sum + Math.max(member.populationImpact, 1), 0);
+  const longitude = members.reduce((sum, member) => sum + member.longitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
+  const latitude = members.reduce((sum, member) => sum + member.latitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
+  const pixel = projectToPixels(longitude, latitude, zoom);
+
+  return {
+    members,
+    longitude,
+    latitude,
+    x: pixel.x,
+    y: pixel.y,
+    populationImpact,
+    radiusPixels: impactRadiusPixels(populationImpact),
+  } satisfies ScreenCluster;
+};
+
+const clustersIntersect = (first: ScreenCluster, second: ScreenCluster) => {
+  const distance = Math.hypot(first.x - second.x, first.y - second.y);
+  return distance <= first.radiusPixels + second.radiusPixels + 2;
+};
+
+const buildClusterPoint = (key: string, members: DistrictPoint[]) => {
     const totalImpact = members.reduce((sum, member) => sum + member.populationImpact, 0);
     const totalHouseholds = members.reduce((sum, member) => sum + member.households, 0);
     const totalWomen = members.reduce((sum, member) => sum + member.women, 0);
-    const totalWeight = Math.max(totalImpact, members.length);
+    const totalWeight = members.reduce((sum, member) => sum + Math.max(member.populationImpact, 1), 0);
     const longitude = members.reduce((sum, member) => sum + member.longitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
     const latitude = members.reduce((sum, member) => sum + member.latitude * Math.max(member.populationImpact, 1), 0) / totalWeight;
     const interventionPriority = strongestPriority(members.map((member) => member.interventionPriority));
@@ -319,8 +344,33 @@ const clusterPoints = (points: DistrictPoint[], zoom: number) => {
       memberCount: members.length,
       districts,
       clusterColor: weightedColor,
+      radiusPixels: impactRadiusPixels(totalImpact),
     } satisfies DistrictPoint;
-  });
+};
+
+const clusterPoints = (points: DistrictPoint[], zoom: number) => {
+  let clusters = points.map((point) => screenClusterFromMembers([point], zoom));
+
+  let merged = true;
+  while (merged) {
+    merged = false;
+
+    for (let firstIndex = 0; firstIndex < clusters.length && !merged; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < clusters.length; secondIndex += 1) {
+        const first = clusters[firstIndex];
+        const second = clusters[secondIndex];
+
+        if (clustersIntersect(first, second)) {
+          const mergedCluster = screenClusterFromMembers([...first.members, ...second.members], zoom);
+          clusters = clusters.filter((_, index) => index !== firstIndex && index !== secondIndex).concat(mergedCluster);
+          merged = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return clusters.map((cluster, index) => buildClusterPoint(`cluster:${zoom.toFixed(2)}:${index}`, cluster.members));
 };
 
 function useCareDesertData() {
@@ -435,8 +485,8 @@ function useMapboxHeatmap(points: DistrictPoint[], selected: DistrictPoint | nul
           id: 'care-desert-points',
           data: points,
           getPosition: (point) => [point.longitude, point.latitude],
-          getRadius: (point) => Math.max(12000, Math.min(76000, 10000 + Math.sqrt(Math.max(point.populationImpact, 1)) * 1150)),
-          radiusUnits: 'meters',
+          getRadius: (point) => point.radiusPixels,
+          radiusUnits: 'pixels',
           stroked: true,
           filled: true,
           lineWidthMinPixels: 1.4,
@@ -522,6 +572,7 @@ export function LakebasePage() {
       memberCount: 1,
       districts: [normalize(row.district_name) || 'Unknown district'],
       clusterColor: priorityFillColor(normalize(row.intervention_priority) || 'Unknown Priority'),
+      radiusPixels: impactRadiusPixels(toNumber(row.estimated_population_impact)),
     } satisfies DistrictPoint;
   }), [category, rows]);
 
